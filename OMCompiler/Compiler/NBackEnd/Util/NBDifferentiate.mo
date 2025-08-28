@@ -648,7 +648,7 @@ public
         if UnorderedMap.contains(strippedCref, diff_map) then
           // get the derivative and reapply subscripts
           derCref := UnorderedMap.getOrFail(strippedCref, diff_map);
-          derCref := ComponentRef.mergeSubscripts(ComponentRef.subscriptsAllFlat(exp.cref), derCref, true);
+          derCref := ComponentRef.copySubscripts(exp.cref, derCref);
           res     := Expression.fromCref(derCref);
         else
           res     := Expression.makeZero(exp.ty);
@@ -711,9 +711,9 @@ public
       // known derivatives by state order
       case (Expression.CREF(), DifferentiationType.TIME, SOME(diff_map))
         guard(UnorderedMap.contains(ComponentRef.stripSubscriptsAll(exp.cref), diff_map)) algorithm
-          // get the derivative and reapply subscripts
+        // get the derivative and reapply subscripts
         derCref := UnorderedMap.getOrFail(ComponentRef.stripSubscriptsAll(exp.cref), diff_map);
-        derCref := ComponentRef.mergeSubscripts(ComponentRef.subscriptsAllFlat(exp.cref), derCref, true);
+        derCref := ComponentRef.copySubscripts(exp.cref, derCref);
         res     := Expression.fromCref(derCref);
       then (res, diffArguments);
 
@@ -771,7 +771,7 @@ public
         if UnorderedMap.contains(strippedCref, diff_map) then
           // get the derivative an reapply subscripts
           derCref := UnorderedMap.getOrFail(strippedCref, diff_map);
-          derCref := ComponentRef.mergeSubscripts(ComponentRef.subscriptsAllFlat(exp.cref), derCref, true);
+          derCref := ComponentRef.copySubscripts(exp.cref, derCref);
           res     := Expression.fromCref(derCref);
         else
           res     := Expression.makeZero(exp.ty);
@@ -1045,6 +1045,19 @@ public
         (ret1, diffArguments) := differentiateExpression(arg1, diffArguments);
         (ret2, diffArguments) := differentiateExpression(arg2, diffArguments);
         exp.call := Call.setArguments(exp.call, {ret1, ret2});
+      then exp;
+
+      // d/dz promote(A, n) = promote(dA/dz, n)
+      case (Expression.CALL()) guard(name == "promote")
+      algorithm
+        (arg1, arg2) := match Call.arguments(exp.call)
+          case {arg1, arg2} then (arg1, arg2);
+          else algorithm
+            Error.addMessage(Error.INTERNAL_ERROR,{getInstanceName() + " failed for: " + Expression.toString(exp) + "."});
+          then fail();
+        end match;
+        (ret1, diffArguments) := differentiateExpression(arg1, diffArguments);
+        exp.call := Call.setArguments(exp.call, {ret1, arg2});
       then exp;
 
       // FILL
@@ -1437,7 +1450,7 @@ public
         Function dummy_func;
         CachedData cachedData;
         String der_func_name;
-        list<InstNode> local_outputs;
+        list<InstNode> inputs, locals, outputs, local_outputs;
 
       case der_func as Function.FUNCTION(node = node as InstNode.CLASS_NODE(cls = cls)) algorithm
         new_cls := match Pointer.access(cls)
@@ -1456,11 +1469,13 @@ public
             funcDiffArgs.diff_map := SOME(diff_map);
 
             // differentiate interface arguments
-            der_func.inputs   := differentiateFunctionInterfaceNodes(der_func.inputs, interface_map, diff_map, funcDiffArgs, true);
-            der_func.locals   := differentiateFunctionInterfaceNodes(der_func.locals, interface_map, diff_map, funcDiffArgs, true);
-            der_func.outputs  := differentiateFunctionInterfaceNodes(der_func.outputs, interface_map, diff_map, funcDiffArgs, false);
+            (inputs, funcDiffArgs)  := differentiateFunctionInterfaceNodes(der_func.inputs, interface_map, diff_map, funcDiffArgs, true);
+            (locals, funcDiffArgs)  := differentiateFunctionInterfaceNodes(der_func.locals, interface_map, diff_map, funcDiffArgs, true);
+            (outputs, funcDiffArgs) := differentiateFunctionInterfaceNodes(der_func.outputs, interface_map, diff_map, funcDiffArgs, false);
 
-            der_func.locals   := listAppend(der_func.locals, local_outputs);
+            der_func.inputs   := inputs;
+            der_func.locals   := listAppend(locals, local_outputs);
+            der_func.outputs  := outputs;
 
             // create "fake" function with correct interface to have the interface
             // in the case of recursive differentiation (e.g. function calls itself)
@@ -1496,6 +1511,9 @@ public
             cachedData            := CachedData.FUNCTION({der_func}, true, false);
             der_func.node         := InstNode.setFuncCache(node, cachedData);
             der_func.derivatives  := {};
+
+            // save the function tree
+            diffArguments.funcTree := funcDiffArgs.funcTree;
           then new_cls;
 
           else algorithm
@@ -1617,7 +1635,7 @@ public
     CachedData cachedData;
     InstNode diffVar;
     ComponentRef diffCref;
-    list<InstNode> local_outputs;
+    list<InstNode> locals, outputs, local_outputs;
     Boolean changed = false;
   algorithm
     func := match func
@@ -1647,11 +1665,12 @@ public
                   createInterfaceDerivatives(der_func.outputs, interface_map, diff_map);
                   diffArgs.diff_map   := SOME(diff_map);
 
-                  der_func.locals   := differentiateFunctionInterfaceNodes(der_func.locals, interface_map, diff_map, diffArgs, true);
-                  der_func.outputs  := differentiateFunctionInterfaceNodes(der_func.outputs, interface_map, diff_map, diffArgs, false);
+                  (locals, diffArgs)  := differentiateFunctionInterfaceNodes(der_func.locals, interface_map, diff_map, diffArgs, true);
+                  (outputs, diffArgs) := differentiateFunctionInterfaceNodes(der_func.outputs, interface_map, diff_map, diffArgs, false);
 
                   diffCref          := UnorderedMap.getSafe(ComponentRef.fromNode(var, InstNode.getType(var)), diff_map, sourceInfo());
-                  der_func.locals   := listAppend(der_func.locals, local_outputs);
+                  der_func.locals   := listAppend(locals, local_outputs);
+                  der_func.outputs  := outputs;
 
                   // differentiate function statements
                   (algorithms, diffArgs) := List.mapFold(algorithms, differentiateAlgorithm, diffArgs);
